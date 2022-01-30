@@ -1,0 +1,97 @@
+# This script returns the total spend and number of POs referencing an FMIS taxonomical category, only counting once per PO
+# Author: Jansen Manahan
+# Last updated: 6/21/18
+# NOTE: final table has NA values for some smaller level 2 category counts because they were not the largest category in the PO
+
+# Set Up --------------------------------------------------------------------------------------------------------------------------------------------
+library(readxl)
+library(tidyverse)
+library(kableExtra)
+setwd("O:/Codebase/0_FMIS_Source_Data/July1-2017_June15-2018_Pull")
+REQ_TO_PO_SPILT_PO_SIDE_PUBLIC_9491 <- read_excel("REQ_TO_PO_SPILT_PO_SIDE_PUBLIC_July1_June15.xlsx", skip = 1)
+setwd("O:/Codebase/4_Taxonomy1_JM")
+
+# Clean ---------------------------------------------------------------------------------------------------------------------------------------------
+L2Duplicates <- # Some taxonomy is not MECE, so we need to clean the data for it
+  REQ_TO_PO_SPILT_PO_SIDE_PUBLIC_9491 %>% 
+  distinct(.data$`Level 1`, .data$`Level 2`) %>% 
+  count(.data$`Level 2`) %>%
+  filter(n == 2) %>%
+  select(`Level 2`)
+
+POs <-
+  REQ_TO_PO_SPILT_PO_SIDE_PUBLIC_9491 %>%
+  filter(.data$Status != c("O", "PA", "PX")) %>% # In the best case scenario, wouldn't "X"~canceled be removed as well?
+  mutate(IsDuplicateCtg = ifelse(.data$`Level 2` %in% L2Duplicates$`Level 2`, T, F)) %>%
+  mutate(ExplicitL2 = str_glue("{`Level 2`}_{`Level 1`}")) %>%
+  rownames_to_column()
+
+CleanDF <- 
+  POs %>% # IF-ELSE doesn't work with glued data, so UNCLASS is used on it
+  mutate(Taxonomy = if_else(.data$IsDuplicateCtg == T, unclass(.data$ExplicitL2), .data$`Level 2`))
+
+# Data manipulation/calculation ---------------------------------------------------------------------------------------------------------------------
+X <-
+  CleanDF %>% # de-duplication where PO.POLine becomes key (disregarding BU [and Distrib info]) to mesh with other analyses
+  group_by(.data$`PO No.`, .data$Taxonomy) %>%
+  mutate(POCtgSize = max(sum(.data$`Sum Amount`))) %>%
+  ungroup() # ungroup here because the df will be grouped in multiple ways later
+
+POCtg <-
+  X %>% 
+  group_by(.data$`PO No.`) %>%
+  filter(POCtgSize == max(POCtgSize)) %>% # some downstream category sums will be shy of the max amt, so this isn't used there
+  slice(1) %>% # did not use TOP_N since it has ties and the PO value is unimportant; slicing ensures that the no. of POs is maintained
+  ungroup()
+
+# Calculate data ------------------------------------------------------------------------------------------------------------------------------------
+# Calculations made in several steps since datasets in use differ slightly; may be a better way to do this
+
+Level2Ct <- # Separate from L1Ct and sums because of a differing distinct function
+  POCtg %>%
+  group_by(.data$Taxonomy, .data$`Level 1`) %>% # Grouping by L1 in order to use it in a future join to L1 Ct and Sum
+  summarize(NumPOL2 = n())
+
+Level1Ct <- # Could maybe be piped from Level2Ct
+  POCtg %>%
+  group_by(.data$`Level 1`) %>%
+  summarize(NumPOL1 = n())
+
+Level2Sum <-
+  X %>%
+  group_by(.data$Taxonomy, .data$`Level 1`) %>%
+  summarize(TotalSpendL2 = sum(.data$`Sum Amount`))
+
+Level1Sum <-
+  Level2Sum %>%
+  ungroup() %>%
+  group_by(.data$`Level 1`) %>%
+  summarize(TotalSpendL1 = sum(.data$TotalSpendL2))
+
+
+# Build table ---------------------------------------------------------------------------------------------------------------------------------------
+L1 <- left_join(Level1Sum, Level1Ct, by = "Level 1")
+L2 <- left_join(Level2Sum, Level2Ct, by = c("Taxonomy", "Level 1")) # If we don't on L1, then there is some NA bleeding on TaxonomySummary
+TaxonomySummary <-
+  left_join(L2, L1, by = "Level 1") %>%
+  rename(Level_1_Taxonomy = `Level 1`, Level_2_Taxonomy = `Taxonomy`) %>% 
+  select(2, 5, 6, 1, 3, 4) %>% # Orders as L1 first, then L2
+  arrange(.data$Level_1_Taxonomy)
+write.csv(TaxonomySummary, file = "Taxonomy_Summary_Table.csv")
+
+# Footer --------------------------------------------------------------------------------------------------------------------------------------------
+# Generates the number of POIDs with 2+ ctg2s, showing issue with duplicate level 2 taxonomies
+POs %>% 
+  distinct(.data$`Level 1`, .data$`Level 2`) %>% 
+  group_by(.data$`Level 2`) %>% 
+  count() %>%
+  filter(.data$n > 1)
+
+# Number of POs in the affected categories
+CleanDF %>% 
+  distinct(.data$`PO No.`, .data$Taxonomy) %>% 
+  group_by(.data$`PO No.`) %>% 
+  count() %>%
+  filter(.data$n > 1) %>%
+  ungroup() %>% 
+  count()

@@ -1,0 +1,166 @@
+---
+title: "PO Bucket Drilldown"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(kableExtra)
+library(knitr)
+```
+
+```{r allcode, include = FALSE, echo=FALSE}
+# Dashboard/Thresholds/POs_<1000_>50000
+# Created by Jansen Manahan 6/14/18
+# Last updated by Jansen Manahan 6/20/18
+library(readxl)
+library(dplyr)
+library(kableExtra)
+library(knitr)
+setwd("O:/Codebase/0_FMIS_Source_Data/July1-2017_June15-2018_Pull")
+Raw <- read_excel("REQ_TO_PO_SPILT_PO_SIDE_PUBLIC_July1_June15.xlsx", skip = 1)
+setwd("O:/Codebase/3_POsUnder1000orOver50000_JM")
+
+
+# Clean ---------------------------------------------------------------------------------------------------------------------------------------------
+# AllPOs is a dataframe that has all of the information needed for the analysis
+# Note that PO.POLine becomes key (disregarding BU) to mesh with other analyses
+Blacklist <- c( # Blacklist added to ensure that this analysis uses the same dataset as the current PO-under-$1000 script in folder 2
+  4000087408, # The requisition and the PO don't match because the req is from MBTAF ($890000) and the PO is from MBTAN ($150)
+  4000088447  # This is excluded because it is now 2 cents, changed from $10,300 probably a a workaround for cancelling the PO
+)
+
+AllPOs <- 
+  Raw %>%
+  filter(.data$Status != c("O", "PA", "PX"), !.data$`PO No.` %in% Blacklist) %>%
+  # GROUPBY moves unit of analysis from lines to POs // buyer, BU, & origin added to keep them from being erased
+  group_by(.data$`PO No.`, .data$Bussiness_Unit, .data$Buyer, .data$Origin) %>% 
+  summarize(POAmt = sum(.data$`Sum Amount`)) %>%
+  mutate(SpendBins = case_when( # Used in place of splitting buckets into dfs for the purpose of data integrity
+    .data$POAmt <= 1000 ~ "Below_1K",
+    .data$POAmt < 50000 ~ "Mid_Value",
+    .data$POAmt >= 50000 ~ "Above_50K",
+    TRUE ~ "ERROR" # No ERROR results means POAmt is exclusively numerical
+  )) %>%
+  ungroup() # Needed since this df is grouped by other variables in the future
+
+SizeLevels <- factor(c("Below_1K", "Mid_Value", "Above_50K"), levels = c("Below_1K", "Mid_Value", "Above_50K"))
+
+
+# Perform calculations ------------------------------------------------------------------------------------------------------------------------------
+# Sum of spend by Bin
+X <- 
+  AllPOs %>% 
+  mutate(TotalNumPOs = n()) %>% 
+  mutate(TotalSpend = sum(.data$POAmt))
+
+Y <- 
+  AllPOs %>%
+  group_by(.data$SpendBins) %>% 
+  summarize(TotalSpend = sum(.data$POAmt), POCount = n()) %>%
+  mutate(PctOfSpend = .data$TotalSpend / slice(X, 1)$TotalSpend) %>%
+  mutate(PctOfCount = .data$POCount / slice(X, 1)$TotalNumPOs)
+
+write.csv(Y, file = "[Validation]POs_by_Value.csv")
+
+# Sum of spend by Bin-Buyer
+BinBuyer <- 
+  AllPOs%>% 
+  group_by(.data$SpendBins, .data$Buyer) %>% 
+  summarize(SpendByKey = sum(.data$POAmt), POCountByKey = n()) %>%
+  ungroup() # ungroup allows selecting away the SpendBins column
+
+# Sum of spend by Bin-BU
+BinBU <- 
+  AllPOs %>% 
+  group_by(.data$SpendBins, .data$Bussiness_Unit) %>% 
+  summarize(SpendByKey = sum(.data$POAmt), POCountByKey = n()) %>%
+  ungroup() # ungroup allows selecting away the SpendBins column
+
+# Sum of spend by Bin-Orig
+BinOrig <- 
+  AllPOs %>% 
+  group_by(.data$SpendBins, .data$Origin) %>% 
+  summarize(SpendByKey = sum(.data$POAmt), POCountByKey = n()) %>%
+  ungroup() # ungroup allows selecting away the SpendBins column
+
+# Combine into final dataframes ---------------------------------------------------------------------------------------------------------------------
+# Buyers (1MM shy at 1,204,262,081; Correct Number of POs)
+OneKBuyer <- 
+  BinBuyer %>% 
+  filter(.data$SpendBins == "Below_1K") %>%
+  select(-SpendBins)
+
+FiftyKBuyer <- 
+  BinBuyer %>% 
+  filter(.data$SpendBins == "Above_50K") %>%
+  select(-SpendBins)
+
+MidValBuyer <- 
+  BinBuyer %>% 
+  filter(.data$SpendBins == "Mid_Value") %>%
+  select(-SpendBins)
+
+ByBuyer <- 
+  full_join(OneKBuyer, FiftyKBuyer, by = "Buyer", suffix = c(" on POs below 1K", " on POs above 50K")) %>% 
+  rename(KeyValue = Buyer)
+
+# BU (1MM shy at 1,204,262,081; correct number of POs)
+OneKBU <- 
+  BinBU %>% 
+  filter(.data$SpendBins == "Below_1K") %>%
+  select(-SpendBins)
+
+FiftyKBU <- 
+  BinBU %>% 
+  filter(.data$SpendBins == "Above_50K") %>%
+  select(-SpendBins)
+
+MidValBU <- 
+  BinBU %>% 
+  filter(.data$SpendBins == "Mid_Value") %>%
+  select(-SpendBins)
+
+ByBuyer_BU <- 
+  full_join(OneKBU, FiftyKBU, by = "Bussiness_Unit", suffix = c(" on POs below 1K", " on POs above 50K")) %>% 
+  rename(KeyValue = Bussiness_Unit) %>%
+  bind_rows(ByBuyer)
+
+# Origin (1MM shy at 1,204,262,081; correct number of POs)
+OneKOrigin <- 
+  BinOrig %>% 
+  filter(.data$SpendBins == "Below_1K") %>%
+  select(-SpendBins) # %>%
+  # if_else(is.na(.data$Origin) = T, "-", .data$Origin)
+
+FiftyKOrigin <- 
+  BinOrig %>% 
+  filter(.data$SpendBins == "Above_50K") %>%
+  select(-SpendBins)
+
+MidValOrigin <- 
+  BinOrig %>% 
+  filter(.data$SpendBins == "Mid_Value") %>%
+  select(-SpendBins)
+
+ByAllKeys <- 
+  full_join(OneKOrigin, FiftyKOrigin, by = "Origin", suffix = c(" on POs below 1K", " on POs above 50K")) %>% 
+  rename(KeyValue = Origin) %>%
+  bind_rows(ByBuyer_BU) %>% 
+  rename(" " = 1, "Spend" = 2, "PO Count" = 3, "Spend" = 4, "PO Count" = 5)
+
+write.csv(ByAllKeys, file = "Below_1000_or_above_50000.csv")
+
+```
+
+```{r kabelize, echo=FALSE}
+# Does not include MidVals
+# Make sure to group rows manually wherever the ### MANUAL tag is
+ByAllKeys %>% 
+  kable() %>% 
+  kable_styling() %>%
+  add_header_above(c(" ", "< $1000" = 2, "> $50,000" = 2)) %>% 
+  group_rows("Origin", 1, 6) %>% ### MANUAL
+  group_rows("BU", 7, 10) %>% ### MANUAL
+  group_rows("Buyer", 11, 32) ### MANUAL
+```
